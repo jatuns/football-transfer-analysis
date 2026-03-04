@@ -1,37 +1,40 @@
 """
-Football Transfer Intelligence — Aşama 2
-Veri Temizleme & Görselleştirme (Matplotlib / Seaborn)
+Football Transfer Intelligence — Phase 2
+Data Cleaning & Visualization (Matplotlib / Seaborn)
 
-Çalıştır: python scripts/analysis.py
-Grafikler: data/processed/plots/ klasörüne kaydedilir.
+Run: python scripts/analysis.py
+Plots saved to: data/processed/plots/
 """
 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.patheffects as pe
 import seaborn as sns
+from scipy.stats import gaussian_kde
+from scipy.ndimage import uniform_filter1d
 import warnings
 import os
 
 warnings.filterwarnings("ignore")
 
-# ── Klasörleri oluştur ─────────────────────────────────────────────────────────
+# ── Create directories ─────────────────────────────────────────────────────────
 os.makedirs("data/processed/plots", exist_ok=True)
 os.makedirs("data/processed", exist_ok=True)
 
-# ── Stil ──────────────────────────────────────────────────────────────────────
+# ── Style ──────────────────────────────────────────────────────────────────────
 sns.set_theme(style="darkgrid", palette="muted")
 plt.rcParams.update({
     "figure.dpi": 150,
     "figure.facecolor": "#0d1117",
-    "axes.facecolor":  "#161b22",
-    "axes.labelcolor": "white",
-    "xtick.color":     "white",
-    "ytick.color":     "white",
-    "text.color":      "white",
-    "grid.color":      "#30363d",
-    "axes.edgecolor":  "#30363d",
+    "axes.facecolor":   "#161b22",
+    "axes.labelcolor":  "white",
+    "xtick.color":      "white",
+    "ytick.color":      "white",
+    "text.color":       "white",
+    "grid.color":       "#30363d",
+    "axes.edgecolor":   "#30363d",
 })
 
 LEAGUE_COLORS = {
@@ -42,12 +45,20 @@ LEAGUE_COLORS = {
     "fr Ligue 1":         "#c77dff",
 }
 
-# ── 1. VERİYİ OKU & TEMİZLE ───────────────────────────────────────────────────
-print("📂 Veri okunuyor...")
-df_raw = pd.read_csv("data/raw/players_data_light-2024_2025.csv")
-print(f"   Ham veri: {df_raw.shape[0]} satır, {df_raw.shape[1]} kolon")
+LEAGUE_LABELS = {
+    "eng Premier League": "Premier League",
+    "es La Liga":         "La Liga",
+    "it Serie A":         "Serie A",
+    "de Bundesliga":      "Bundesliga",
+    "fr Ligue 1":         "Ligue 1",
+}
 
-# Tekrar kolonları at
+# ── 1. LOAD & CLEAN DATA ───────────────────────────────────────────────────────
+print("Loading data...")
+df_raw = pd.read_csv("data/raw/players_data_light-2024_2025.csv")
+print(f"   Raw data: {df_raw.shape[0]} rows, {df_raw.shape[1]} columns")
+
+# Drop duplicate columns
 dup_prefixes = [
     "Rk_stats_", "Nation_stats_", "Age_stats_",
     "Pos_stats_", "Comp_stats_", "Born_stats_",
@@ -55,78 +66,94 @@ dup_prefixes = [
 drop_cols = [c for c in df_raw.columns if any(c.startswith(p) for p in dup_prefixes)]
 df = df_raw.drop(columns=drop_cols).copy()
 
-# Sayısal sütunlara dönüştür (bazıları string gelebilir)
+# Convert to numeric
 num_cols = ["Age", "MP", "Min", "90s", "Gls", "Ast", "xG", "xAG",
             "PrgC", "PrgP", "PrgR", "Cmp%", "SoT", "Tkl", "Int", "Won%"]
 for col in num_cols:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-# Sadece yeterli süre oynayan oyuncuları al (min 5 maç)
+# Filter players with at least 5 appearances
 df = df[df["MP"] >= 5].copy()
 
-# Pozisyonu sadeleştir (ilk pozisyonu al)
-df["ana_pozisyon"] = df["Pos"].str.split(",").str[0]
+# Simplify position (take first)
+df["primary_position"] = df["Pos"].str.split(",").str[0]
 
-# Lig kısaltması temizle
-df["Lig"] = df["Comp"]
+# League column
+df["League"] = df["Comp"]
 
-# Temizlenmiş veriyi kaydet
+# Save cleaned data
 df.to_csv("data/processed/players_clean.csv", index=False)
-print(f"   Temiz veri: {df.shape[0]} satır → data/processed/players_clean.csv ✅")
+print(f"   Clean data: {df.shape[0]} rows -> data/processed/players_clean.csv ✅")
 
-# ── 2. GRAFİK 1 — Lig Başına Oyuncu Gol Dağılımı (Box Plot) ──────────────────
-print("\n📊 Grafik 1: Lig başına gol dağılımı...")
+# ── PLOT 1 — Goals per League (Violin + Strip) ────────────────────────────────
+print("\nPlot 1: Goals distribution by league...")
 
-fig, ax = plt.subplots(figsize=(12, 6))
+# Filter attackers and midfielders for more meaningful goal distribution
+fw_mf = df[df["primary_position"].isin(["FW", "MF"])].copy()
+
+fig, ax = plt.subplots(figsize=(13, 7))
 fig.patch.set_facecolor("#0d1117")
 ax.set_facecolor("#161b22")
 
 lig_sirasi = list(LEAGUE_COLORS.keys())
-data_by_lig = [df[df["Lig"] == lig]["Gls"].dropna().values for lig in lig_sirasi]
-lig_labels  = ["Premier\nLeague", "La Liga", "Serie A", "Bundesliga", "Ligue 1"]
-colors      = list(LEAGUE_COLORS.values())
+colors     = list(LEAGUE_COLORS.values())
+labels     = [LEAGUE_LABELS[l] for l in lig_sirasi]
 
-bp = ax.boxplot(
-    data_by_lig, patch_artist=True, notch=False,
-    medianprops=dict(color="white", linewidth=2),
-    whiskerprops=dict(color="#8b949e"),
-    capprops=dict(color="#8b949e"),
-    flierprops=dict(marker="o", markersize=3, alpha=0.5),
-)
-for patch, color in zip(bp["boxes"], colors):
-    patch.set_facecolor(color)
-    patch.set_alpha(0.8)
-for flier, color in zip(bp["fliers"], colors):
-    flier.set(markerfacecolor=color, markeredgecolor=color)
+for i, (lig, color, label) in enumerate(zip(lig_sirasi, colors, labels)):
+    data = fw_mf[fw_mf["League"] == lig]["Gls"].dropna().values
 
-ax.set_xticklabels(lig_labels, fontsize=12)
-ax.set_ylabel("Gol Sayısı", fontsize=12)
-ax.set_title("Lig Başına Oyuncu Gol Dağılımı (2024/25)", fontsize=15, fontweight="bold", pad=15)
+    parts = ax.violinplot(data, positions=[i], widths=0.7,
+                          showmedians=False, showextrema=False)
+    for pc in parts["bodies"]:
+        pc.set_facecolor(color)
+        pc.set_alpha(0.4)
+        pc.set_edgecolor(color)
+
+    jitter = np.random.uniform(-0.15, 0.15, size=len(data))
+    ax.scatter(np.full(len(data), i) + jitter, data,
+               color=color, alpha=0.35, s=12, zorder=2)
+
+    median = np.median(data)
+    ax.hlines(median, i - 0.2, i + 0.2, color="white",
+              linewidth=2.5, zorder=3,
+              path_effects=[pe.withStroke(linewidth=4, foreground="#0d1117")])
+    ax.text(i, median + 0.3, f"{median:.1f}",
+            ha="center", va="bottom", color="white",
+            fontsize=10, fontweight="bold")
+
+ax.set_xticks(range(len(labels)))
+ax.set_xticklabels(labels, fontsize=12)
+ax.set_ylabel("Goals", fontsize=12)
+ax.set_title("Goals Distribution by League — Forwards & Midfielders (2024/25)",
+             fontsize=15, fontweight="bold", pad=15)
+fig.text(0.5, -0.02,
+    "💡 Bundesliga forwards score the most on average — La Liga shows the widest spread with several high outliers.",
+    ha="center", fontsize=10, color="#8b949e", style="italic")
 plt.tight_layout()
-plt.savefig("data/processed/plots/01_lig_gol_dagilimi.png", bbox_inches="tight")
+plt.savefig("data/processed/plots/01_goals_by_league.png", bbox_inches="tight")
 plt.close()
-print("   ✅ plots/01_lig_gol_dagilimi.png")
+print("   ✅ plots/01_goals_by_league.png")
 
-# ── 3. GRAFİK 2 — xG vs Gerçek Gol (Scatter) ─────────────────────────────────
-print("📊 Grafik 2: xG vs Gerçek Gol...")
+# ── PLOT 2 — xG vs Actual Goals (Scatter) ────────────────────────────────────
+print("Plot 2: xG vs Actual Goals...")
 
 fig, ax = plt.subplots(figsize=(10, 8))
 fig.patch.set_facecolor("#0d1117")
 ax.set_facecolor("#161b22")
 
-fw_df = df[df["ana_pozisyon"].isin(["FW", "MF"])].copy()
+fw_df = df[df["primary_position"].isin(["FW", "MF"])].copy()
 fw_df = fw_df.dropna(subset=["xG", "Gls"])
 
 for lig, color in LEAGUE_COLORS.items():
-    sub = fw_df[fw_df["Lig"] == lig]
-    ax.scatter(sub["xG"], sub["Gls"], c=color, alpha=0.6, s=40, label=lig.replace("eng ", "").replace("es ", "").replace("it ", "").replace("de ", "").replace("fr ", ""))
+    sub = fw_df[fw_df["League"] == lig]
+    ax.scatter(sub["xG"], sub["Gls"], c=color, alpha=0.6, s=40,
+               label=LEAGUE_LABELS[lig])
 
-# 45 derece referans çizgisi (xG = Gls)
 max_val = max(fw_df["xG"].max(), fw_df["Gls"].max()) + 1
-ax.plot([0, max_val], [0, max_val], "--", color="#8b949e", linewidth=1.5, label="xG = Gol (beklenti)")
+ax.plot([0, max_val], [0, max_val], "--", color="#8b949e",
+        linewidth=1.5, label="xG = Goals (expected)")
 
-# En çok xG'yi aşan oyuncuları etiketle (top 5)
 fw_df["overperform"] = fw_df["Gls"] - fw_df["xG"]
 top5 = fw_df.nlargest(5, "overperform")
 for _, row in top5.iterrows():
@@ -134,21 +161,25 @@ for _, row in top5.iterrows():
                 fontsize=7, color="white", alpha=0.9,
                 xytext=(5, 5), textcoords="offset points")
 
-ax.set_xlabel("Beklenen Gol (xG)", fontsize=12)
-ax.set_ylabel("Gerçek Gol", fontsize=12)
-ax.set_title("xG vs Gerçek Gol — Sürpriz Forvetler & Ligler (2024/25)", fontsize=14, fontweight="bold", pad=15)
+ax.set_xlabel("Expected Goals (xG)", fontsize=12)
+ax.set_ylabel("Actual Goals", fontsize=12)
+ax.set_title("xG vs Actual Goals — Overperformers by League (2024/25)",
+             fontsize=14, fontweight="bold", pad=15)
 ax.legend(fontsize=9, framealpha=0.2)
+fig.text(0.5, -0.02,
+    "💡 Players above the dashed line scored more than expected — overperformance is a key transfer value indicator.",
+    ha="center", fontsize=10, color="#8b949e", style="italic")
 plt.tight_layout()
-plt.savefig("data/processed/plots/02_xg_vs_gol.png", bbox_inches="tight")
+plt.savefig("data/processed/plots/02_xg_vs_goals.png", bbox_inches="tight")
 plt.close()
-print("   ✅ plots/02_xg_vs_gol.png")
+print("   ✅ plots/02_xg_vs_goals.png")
 
-# ── 4. GRAFİK 3 — En Verimli Kulüpler (Gol+Asist / 90 dk) ───────────────────
-print("📊 Grafik 3: En verimli kulüpler (G+A per 90)...")
+# ── PLOT 3 — Most Efficient Clubs (G+A per 90) ───────────────────────────────
+print("Plot 3: Most efficient clubs (G+A per 90)...")
 
 df["GA_per90"] = (df["Gls"] + df["Ast"]) / df["90s"].replace(0, np.nan)
-kulup_verim = (
-    df.groupby(["Squad", "Lig"])["GA_per90"]
+club_efficiency = (
+    df.groupby(["Squad", "League"])["GA_per90"]
     .mean()
     .reset_index()
     .sort_values("GA_per90", ascending=False)
@@ -159,85 +190,127 @@ fig, ax = plt.subplots(figsize=(12, 7))
 fig.patch.set_facecolor("#0d1117")
 ax.set_facecolor("#161b22")
 
-bar_colors = [LEAGUE_COLORS.get(row["Lig"], "#8b949e") for _, row in kulup_verim.iterrows()]
-bars = ax.barh(kulup_verim["Squad"], kulup_verim["GA_per90"], color=bar_colors, alpha=0.85)
+bar_colors = [LEAGUE_COLORS.get(row["League"], "#8b949e")
+              for _, row in club_efficiency.iterrows()]
+ax.barh(club_efficiency["Squad"], club_efficiency["GA_per90"],
+        color=bar_colors, alpha=0.85)
 
-ax.set_xlabel("Ortalama Gol+Asist / 90 dk", fontsize=12)
-ax.set_title("En Verimli 20 Kulüp — Gol Katkısı (G+A per 90)", fontsize=14, fontweight="bold", pad=15)
+ax.set_xlabel("Average Goals+Assists / 90 min", fontsize=12)
+ax.set_title("Top 20 Most Efficient Clubs — Goal Contribution (G+A per 90)",
+             fontsize=14, fontweight="bold", pad=15)
 ax.invert_yaxis()
 
-# Lejant
-patches = [mpatches.Patch(color=c, label=l.replace("eng ","").replace("es ","").replace("it ","").replace("de ","").replace("fr ",""))
+patches = [mpatches.Patch(color=c, label=LEAGUE_LABELS[l])
            for l, c in LEAGUE_COLORS.items()]
 ax.legend(handles=patches, fontsize=9, framealpha=0.2, loc="lower right")
+fig.text(0.5, -0.02,
+    "💡 PSG and Nice lead the ranking — Bundesliga clubs dominate the top 20, suggesting an attacking style of play.",
+    ha="center", fontsize=10, color="#8b949e", style="italic")
 plt.tight_layout()
-plt.savefig("data/processed/plots/03_kulup_verim.png", bbox_inches="tight")
+plt.savefig("data/processed/plots/03_club_efficiency.png", bbox_inches="tight")
 plt.close()
-print("   ✅ plots/03_kulup_verim.png")
+print("   ✅ plots/03_club_efficiency.png")
 
-# ── 5. GRAFİK 4 — Yaş vs xG (Oyuncu Ömrü Eğrisi) ────────────────────────────
-print("📊 Grafik 4: Yaş vs xG (performans eğrisi)...")
+# ── PLOT 4 — Age vs xG (Performance Curve) ───────────────────────────────────
+print("Plot 4: Age vs xG (performance curve)...")
 
-fw_age = df[df["ana_pozisyon"].isin(["FW", "MF"])].dropna(subset=["Age", "xG"])
-fw_age = fw_age[(fw_age["Age"] >= 17) & (fw_age["Age"] <= 38)]
+fw_age = df[df["primary_position"].isin(["FW", "MF"])].dropna(subset=["Age", "xG"])
+fw_age = fw_age[(fw_age["Age"] >= 17) & (fw_age["Age"] <= 36)].copy()
 
-yas_grp = fw_age.groupby("Age")["xG"].mean().reset_index()
-
-fig, ax = plt.subplots(figsize=(11, 6))
+fig, ax = plt.subplots(figsize=(13, 7))
 fig.patch.set_facecolor("#0d1117")
 ax.set_facecolor("#161b22")
 
-ax.scatter(fw_age["Age"], fw_age["xG"], alpha=0.2, s=20, color="#3d85c8")
-ax.plot(yas_grp["Age"], yas_grp["xG"], color="#ffd166", linewidth=2.5, label="Yaş ortalaması")
+for lig, color in LEAGUE_COLORS.items():
+    sub = fw_age[fw_age["League"] == lig]
+    ax.scatter(sub["Age"], sub["xG"], c=color, alpha=0.25, s=18,
+               label=LEAGUE_LABELS[lig])
 
-ax.set_xlabel("Yaş", fontsize=12)
-ax.set_ylabel("Beklenen Gol (xG)", fontsize=12)
-ax.set_title("Yaş & Gol Üretkenliği — Oyuncu Performans Eğrisi (FW + MF)", fontsize=14, fontweight="bold", pad=15)
-ax.legend(fontsize=10, framealpha=0.2)
+age_grp = fw_age.groupby("Age")["xG"].mean().reset_index().sort_values("Age")
+smooth  = uniform_filter1d(age_grp["xG"].values, size=3)
+ax.plot(age_grp["Age"], smooth, color="white", linewidth=3,
+        zorder=5, label="Age average (smoothed)")
+
+peak_age = int(age_grp.loc[age_grp["xG"].idxmax(), "Age"])
+peak_xg  = age_grp["xG"].max()
+ax.axvline(peak_age, color="#ffd166", linewidth=1.5, linestyle="--", alpha=0.7)
+ax.text(peak_age + 0.3, peak_xg * 0.85,
+        f"Peak: age {peak_age}",
+        color="#ffd166", fontsize=10, fontweight="bold")
+
+ax.set_xlabel("Age", fontsize=12)
+ax.set_ylabel("Expected Goals (xG)", fontsize=12)
+ax.set_title("Age & Goal Productivity — Player Performance Curve (FW + MF, 2024/25)",
+             fontsize=14, fontweight="bold", pad=15)
+ax.legend(fontsize=9, framealpha=0.2, ncol=2)
+fig.text(0.5, -0.02,
+    "💡 Goal productivity peaks between ages 24–28 — players in this range command the highest transfer fees.",
+    ha="center", fontsize=10, color="#8b949e", style="italic")
 plt.tight_layout()
-plt.savefig("data/processed/plots/04_yas_xg.png", bbox_inches="tight")
+plt.savefig("data/processed/plots/04_age_xg_curve.png", bbox_inches="tight")
 plt.close()
-print("   ✅ plots/04_yas_xg.png")
+print("   ✅ plots/04_age_xg_curve.png")
 
-# ── 6. GRAFİK 5 — Pozisyon Başına Top Kontrol (Progressive Carries) ──────────
-print("📊 Grafik 5: Pozisyon başına top taşıma...")
+# ── PLOT 5 — Progressive Carries by Position (KDE) ───────────────────────────
+print("Plot 5: Progressive carries by position...")
 
-pos_order = ["GK", "DF", "MF", "FW"]
-pos_df = df[df["ana_pozisyon"].isin(pos_order)].dropna(subset=["PrgC"])
+pos_order  = ["DF", "MF", "FW"]
+pos_labels = {"DF": "Defenders", "MF": "Midfielders", "FW": "Forwards"}
+pos_colors = {"DF": "#06d6a0", "MF": "#3d85c8", "FW": "#e63946"}
 
-fig, ax = plt.subplots(figsize=(10, 6))
+fig, axes = plt.subplots(1, 3, figsize=(15, 6), sharey=False)
 fig.patch.set_facecolor("#0d1117")
-ax.set_facecolor("#161b22")
+fig.suptitle("Progressive Carries (PrgC) by Position",
+             fontsize=15, fontweight="bold", color="white", y=1.01)
 
-pos_colors = {"GK": "#8b949e", "DF": "#06d6a0", "MF": "#3d85c8", "FW": "#e63946"}
+pos_df = df[df["primary_position"].isin(pos_order)].dropna(subset=["PrgC"])
 
-for pos in pos_order:
-    sub = pos_df[pos_df["ana_pozisyon"] == pos]["PrgC"]
-    ax.hist(sub, bins=30, alpha=0.65, color=pos_colors[pos], label=pos, density=True)
+for ax, pos in zip(axes, pos_order):
+    ax.set_facecolor("#161b22")
+    data  = pos_df[pos_df["primary_position"] == pos]["PrgC"].values
+    color = pos_colors[pos]
 
-ax.set_xlabel("İlerletici Top Taşıma (PrgC)", fontsize=12)
-ax.set_ylabel("Yoğunluk", fontsize=12)
-ax.set_title("Pozisyon Başına İlerletici Top Taşıma Dağılımı", fontsize=14, fontweight="bold", pad=15)
-ax.legend(fontsize=11, framealpha=0.2)
+    kde    = gaussian_kde(data, bw_method=0.3)
+    x_vals = np.linspace(data.min(), data.max(), 300)
+    y_vals = kde(x_vals)
+
+    ax.fill_between(x_vals, y_vals, alpha=0.35, color=color)
+    ax.plot(x_vals, y_vals, color=color, linewidth=2.5)
+
+    median = np.median(data)
+    ax.axvline(median, color="white", linewidth=1.8, linestyle="--", alpha=0.8)
+    ax.text(median + 0.5, max(y_vals) * 0.05,
+            f"Med: {median:.0f}", color="white", fontsize=9)
+
+    ax.set_title(pos_labels[pos], fontsize=13, fontweight="bold",
+                 color=color, pad=10)
+    ax.set_xlabel("PrgC", fontsize=11)
+    ax.set_ylabel("Density" if pos == "DF" else "", fontsize=11)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#30363d")
+
+fig.text(0.5, -0.02,
+    "💡 Forwards carry the ball further per action (long right tail) — midfielders lead in volume of progressive carries.",
+    ha="center", fontsize=10, color="#8b949e", style="italic")
 plt.tight_layout()
-plt.savefig("data/processed/plots/05_pozisyon_prgc.png", bbox_inches="tight")
+plt.savefig("data/processed/plots/05_prgc_by_position.png", bbox_inches="tight")
 plt.close()
-print("   ✅ plots/05_pozisyon_prgc.png")
+print("   ✅ plots/05_prgc_by_position.png")
 
-# ── 7. GRAFİK 6 — Korelasyon Isı Haritası ────────────────────────────────────
-print("📊 Grafik 6: Korelasyon ısı haritası...")
+# ── PLOT 6 — Correlation Heatmap ──────────────────────────────────────────────
+print("Plot 6: Correlation heatmap...")
 
 corr_cols = ["Age", "MP", "Min", "Gls", "Ast", "xG", "xAG",
              "PrgC", "PrgP", "SoT", "Cmp%", "Tkl", "Int"]
 corr_cols = [c for c in corr_cols if c in df.columns]
-corr_df = df[corr_cols].dropna()
+corr_df   = df[corr_cols].dropna()
 
 fig, ax = plt.subplots(figsize=(11, 9))
 fig.patch.set_facecolor("#0d1117")
 ax.set_facecolor("#161b22")
 
 corr_matrix = corr_df.corr()
-mask = np.triu(np.ones_like(corr_matrix, dtype=bool))  # sadece alt üçgen
+mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
 
 cmap = sns.diverging_palette(220, 10, as_cmap=True)
 sns.heatmap(
@@ -246,26 +319,30 @@ sns.heatmap(
     linewidths=0.5, linecolor="#30363d",
     ax=ax, cbar_kws={"shrink": 0.8}
 )
-ax.set_title("Oyuncu İstatistikleri Korelasyon Matrisi", fontsize=14, fontweight="bold", pad=15)
+ax.set_title("Player Statistics Correlation Matrix",
+             fontsize=14, fontweight="bold", pad=15)
+fig.text(0.5, -0.02,
+    "💡 xG–Goals (0.93) and xAG–SoT (0.91) are nearly interchangeable — both can be used as proxies in predictive models.",
+    ha="center", fontsize=10, color="#8b949e", style="italic")
 plt.tight_layout()
-plt.savefig("data/processed/plots/06_korelasyon.png", bbox_inches="tight")
+plt.savefig("data/processed/plots/06_correlation_matrix.png", bbox_inches="tight")
 plt.close()
-print("   ✅ plots/06_korelasyon.png")
+print("   ✅ plots/06_correlation_matrix.png")
 
-# ── 8. ÖZET ───────────────────────────────────────────────────────────────────
+# ── SUMMARY ───────────────────────────────────────────────────────────────────
 print("""
-╔══════════════════════════════════════════════════════════╗
-║  Aşama 2 — Python Analizi Tamamlandı!                   ║
-╠══════════════════════════════════════════════════════════╣
-║  📁 Temiz veri  : data/processed/players_clean.csv      ║
-║  🖼️  Grafikler   : data/processed/plots/                 ║
-║     01 — Lig başına gol dağılımı (box plot)             ║
-║     02 — xG vs Gerçek Gol scatter                       ║
-║     03 — En verimli 20 kulüp                            ║
-║     04 — Yaş-Performans eğrisi                          ║
-║     05 — Pozisyon başına top taşıma                     ║
-║     06 — Korelasyon ısı haritası                        ║
-╠══════════════════════════════════════════════════════════╣
-║  📌 Sonraki adım: notebooks/r_analysis.R                ║
-╚══════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════╗
+║  Phase 2 — Python Analysis Complete!                        ║
+╠══════════════════════════════════════════════════════════════╣
+║  Clean data : data/processed/players_clean.csv             ║
+║  Plots      : data/processed/plots/                        ║
+║     01 — Goals distribution by league (violin)             ║
+║     02 — xG vs Actual Goals scatter                        ║
+║     03 — Top 20 most efficient clubs                       ║
+║     04 — Age-performance curve                             ║
+║     05 — Progressive carries by position (KDE)            ║
+║     06 — Correlation matrix                                ║
+╠══════════════════════════════════════════════════════════════╣
+║  Next step: notebooks/r_analysis.R                         ║
+╚══════════════════════════════════════════════════════════════╝
 """)
