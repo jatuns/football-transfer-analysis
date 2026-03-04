@@ -14,3 +14,15 @@ FROM players p, stats s, clubs c
 WHERE p.player_id = s.player_id AND p.current_club_id = c.club_id
 ORDER BY s.goals DESC
 LIMIT 10;
+
+-- 3. Pozisyon başına ortalama pas yüzdesi
+SELECT 
+    SPLIT_PART(p.position, ',', 1) as ana_pozisyon,
+    ROUND(AVG(s.pass_accuracy), 2) as ort_pas,
+    COUNT(*) as oyuncu_sayisi
+FROM players p
+JOIN stats s ON p.player_id = s.player_id
+WHERE s.pass_accuracy IS NOT NULL
+AND s.appearances >= 10
+GROUP BY SPLIT_PART(p.position, ',', 1)
+ORDER BY ort_pas DESC;
