@@ -11,7 +11,7 @@ conn = psycopg2.connect(
 cursor = conn.cursor()
 
 # CSV'yi oku
-df = pd.read_csv("players_data-2024_2025.csv")
+df = pd.read_csv("data/raw/players_data-2024_2025.csv")
 
 # Tekrar kolonları temizle
 tekrar_kolonlar = [col for col in df.columns if any(
@@ -178,5 +178,66 @@ for _, row in gk.iterrows():
 conn.commit()
 print(f"✅ Kaleci istatistikleri eklendi! {basari} başarılı, {hata} hatalı")
 
+# ADIM 6: Transfer verilerini yükle
+import re
+
+transfers_df = pd.read_csv("data/raw/transfers_2024_25.csv")
+
+def parse_fee(fee_str):
+    if pd.isna(fee_str):
+        return None
+    fee_str = str(fee_str).strip()
+    
+    # Loan fee durumu
+    if "Loan fee:" in fee_str:
+        fee_str = fee_str.replace("Loan fee:", "").strip()
+    
+    fee_str = fee_str.replace("€", "").strip()
+    
+    try:
+        if "m" in fee_str:
+            return float(fee_str.replace("m", "")) * 1_000_000
+        if "k" in fee_str:
+            return float(fee_str.replace("k", "")) * 1_000
+        return float(fee_str)
+    except:
+        return None
+
+transfers_df["fee_numeric"] = transfers_df["transfer_fee"].apply(parse_fee)
+
+basari = 0
+hata = 0
+
+for _, row in transfers_df.iterrows():
+    # Oyuncuyu bul
+    cursor.execute("SELECT player_id FROM players WHERE full_name = %s LIMIT 1", (row["player"],))
+    player = cursor.fetchone()
+    
+    # from_club'ı bul
+    cursor.execute("SELECT club_id FROM clubs WHERE club_name ILIKE %s LIMIT 1", (f"%{row['from_club']}%",))
+    from_club = cursor.fetchone()
+    
+    # to_club'ı bul
+    cursor.execute("SELECT club_id FROM clubs WHERE club_name ILIKE %s LIMIT 1", (f"%{row['to_club']}%",))
+    to_club = cursor.fetchone()
+    
+    if not player:
+        hata += 1
+        continue
+    
+    cursor.execute("""
+        INSERT INTO transfers (player_id, from_club_id, to_club_id, transfer_fee, transfer_type)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (
+        player[0],
+        from_club[0] if from_club else None,
+        to_club[0] if to_club else None,
+        row["fee_numeric"],
+        row["window"]
+    ))
+    basari += 1
+
+conn.commit()
+print(f"✅ Transferler yüklendi! {basari} başarılı, {hata} eşleşmeyen")
 
 conn.close()
